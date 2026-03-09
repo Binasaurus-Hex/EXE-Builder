@@ -13,6 +13,7 @@ section '.text' code readable executable
 	lea	r8,[_caption]
 	lea	rdx,[_message]
 	mov	rcx,0
+  mov QWORD[rbp - 32], 32
 	call	[MessageBoxA]
 
 	mov	ecx,eax

@@ -1,0 +1,18 @@
+Combined :: struct {
+    a: Thingy,
+    b: Vector2
+}
+
+Thingy :: struct {
+    z: int
+}
+
+Vector2 :: struct {
+    x: float, 
+    y: float
+}
+
+
+add :: (a: Vector2, b: Vector2){
+
+}
