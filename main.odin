@@ -525,7 +525,7 @@ main :: proc(){
     write(&a, imul64(.RAX, .RBX))
 
 
-    write(&a, movq_imm64(.RBX, 6))
+    write(&a, movq_imm64(.RBX, 5))
 
     // if rax == rbx {
     write(&a, cmp_r64(.RAX, .RBX))
