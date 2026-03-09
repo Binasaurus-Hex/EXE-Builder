@@ -352,33 +352,39 @@ begin :: proc(a: ^Assembler){
     NumberOfRvaAndSizes = IMAGE_NUMBEROF_DIRECTORY_ENTRIES
   }
 
+  virtual_address: u32 =  SECTION_ALIGNMENT
+  file_address: u32 =     FILE_ALIGNMENT
+
   a.text_section = allocate(output_buffer, IMAGE_SECTION_HEADER)
   a.text_section.VirtualAddress = SECTION_ALIGNMENT
-  a.text_section.SizeOfRawData = FILE_ALIGNMENT
-  a.text_section.PointerToRawData = FILE_ALIGNMENT
+  a.text_section.SizeOfRawData = FILE_ALIGNMENT * 2
+  a.text_section.PointerToRawData = file_address
   a.text_section.Characteristics = transmute(u32)bit_set[SectionFlag;u32]{
     .CODE,
     .MEM_READ,
     .MEM_EXECUTE,
   }
   write_string(&a.text_section.Name[0], ".text")
+  virtual_address += SECTION_ALIGNMENT
+  file_address += a.text_section.SizeOfRawData
 
   a.data_section = allocate(output_buffer, IMAGE_SECTION_HEADER)
-  a.data_section.VirtualAddress = SECTION_ALIGNMENT * 2
-  a.data_section.SizeOfRawData = FILE_ALIGNMENT
-  a.data_section.PointerToRawData = FILE_ALIGNMENT * 2
+  a.data_section.VirtualAddress = virtual_address
+  a.data_section.SizeOfRawData = FILE_ALIGNMENT * 2
+  a.data_section.PointerToRawData = file_address
   a.data_section.Characteristics = transmute(u32)bit_set[SectionFlag;u32]{
     .MEM_READ,
     .MEM_WRITE,
     .INITIALIZED_DATA
   }
   write_string(&a.data_section.Name[0], ".data")
-
+  virtual_address += SECTION_ALIGNMENT
+  file_address += a.data_section.SizeOfRawData
 
   a.import_section = allocate(output_buffer, IMAGE_SECTION_HEADER)
-  a.import_section.VirtualAddress = SECTION_ALIGNMENT * 3
-  a.import_section.PointerToRawData = FILE_ALIGNMENT * 3
+  a.import_section.VirtualAddress = virtual_address
   a.import_section.SizeOfRawData = FILE_ALIGNMENT
+  a.import_section.PointerToRawData = file_address
   a.import_section.Characteristics = transmute(u32)bit_set[SectionFlag;u32]{
     .MEM_READ,
     .MEM_WRITE,
@@ -393,14 +399,25 @@ end :: proc(a: ^Assembler){
   output_buffer := a.output_buffer
   a.text_section.VirtualSize = cast(u32)output_buffer.index - a.text_section.PointerToRawData
 
+  allocated_strings := make(map[cstring]u32, context.temp_allocator)
+
   output_buffer.index = cast(int)a.data_section.PointerToRawData
   // data section
   for data_string in a.data_strings {
-    string_RVA := cast(u32)output_buffer.index - a.data_section.PointerToRawData + a.data_section.VirtualAddress
+    string_offset: u32
+    if offset, found := allocated_strings[data_string.function_name]; found {
+      string_offset = offset
+    }
+    else {
+      string_offset = u32(output_buffer.index)
+      alloc_string(output_buffer, data_string.function_name)
+      allocated_strings[data_string.function_name] = string_offset
+    }
+    string_RVA := string_offset - a.data_section.PointerToRawData + a.data_section.VirtualAddress
     call_RVA := cast(u32)data_string.buffer_index - a.text_section.PointerToRawData + a.text_section.VirtualAddress
     offset :u32 = string_RVA - call_RVA
-    mem.copy(&output_buffer.buffer[data_string.buffer_index - size_of(u32)], &offset, size_of(u32))
-    alloc_string(output_buffer, data_string.function_name)
+    ptr := transmute(^u32)&output_buffer.buffer[data_string.buffer_index - size_of(u32)]
+    ptr^ = offset
   }
   a.data_section.VirtualSize = cast(u32)output_buffer.index - a.data_section.PointerToRawData
 
@@ -442,7 +459,8 @@ end :: proc(a: ^Assembler){
 
         virtual_address := (cast(u32)import_call.buffer_index - a.text_section.PointerToRawData) + a.text_section.VirtualAddress
         offset :u32 = function_call.rva - virtual_address
-        mem.copy(&(output_buffer.buffer[import_call.buffer_index - size_of(u32)]), &offset, size_of(u32))
+        ptr := transmute(^u32)&output_buffer.buffer[import_call.buffer_index - size_of(u32)]
+        ptr^ = offset
       }
       rva_entry := allocate(output_buffer, u64)
       rva_entry^ = function_call.name_RVA
@@ -543,6 +561,10 @@ main :: proc(){
     print(&a, "ELSE BLOCK \n")
     // }
     set_jump(&a, else_block_end)
+
+    for i in 0..< 50 {
+      print(&a, "hello world\n")
+    }
 
     write(&a, movq_imm32(.RCX, 0))
     write(&a, call_relative_32(0))
