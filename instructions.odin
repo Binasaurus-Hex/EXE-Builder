@@ -1,6 +1,7 @@
 package main
 
 import "core:mem"
+import sa "core:container/small_array"
 
 RegisterCode :: enum u8 {
   RAX,
@@ -24,161 +25,321 @@ RegisterCode :: enum u8 {
   NONE,
 }
 
-RM_Prefix :: enum u8 {
-  Memory =              0 << 6,
-  Memory_Displace_8 =   1 << 6,
-  Memory_Displace_32 =  2 << 6,
-  Register =            3 << 6,
+XMM :: proc(n: int) -> RegisterCode {
+  return RegisterCode(n)
 }
 
-push :: proc(register: RegisterCode) -> u8 {
-  assert(register < RegisterCode.R8)
-  return 0x50 | cast(u8)register
+Immediate :: sa.Small_Array(8, u8)
+
+EncodeFlags :: enum {
+  ForceREX,
+  Mode64,
+  CombineReg,
+  UseReg,
+  UseRM,
 }
 
-push_extended :: proc(register: RegisterCode) -> [2]u8 {
-  assert(register >= RegisterCode.R8)
-  return {0x41, 0x50 | cast(u8)register}
+RM :: struct {
+  mode:         RM_Mode,
+  index:        RegisterCode,
+  base:         RegisterCode,
+  displacement: Immediate
 }
 
-pop :: proc(register: RegisterCode) -> u8 {
-  assert(register < RegisterCode.R8)
-  return 0x58 | cast(u8)register
+OP_Code :: sa.Small_Array(3, u8)
+
+EncodeInput :: struct {
+  flags: bit_set[EncodeFlags],
+  op_code_extension: u8,
+  op_code: OP_Code,
+  reg: RegisterCode,
+  rm: RM,
+  immediate: Immediate
 }
 
-pop_extended :: proc(register: RegisterCode) -> [2]u8 {
-  assert(register >= RegisterCode.R8)
-  return {0x41, 0x58 | cast(u8)register }
+encode :: proc(input: EncodeInput) -> (res: EncodedInstruction) {
+  input := input
+  REX, reg, index, base := REX_compute(input.reg, input.rm.index, input.rm.base, .Mode64 in input.flags)
+  if REX != 0x40 || .ForceREX in input.flags { // rex not required
+    sa.append(&res, REX)
+  }
+  sa.append(&res, ..sa.slice(&input.op_code))
+  if .CombineReg in input.flags {
+    res.data[res.len - 1] |= u8(base)
+  }
+  else if .UseRM in input.flags {
+
+    mod_rm: ModRM
+    mod_rm.mode = input.rm.mode
+
+    mod_rm.reg = reg if .UseReg in input.flags else RegisterCode(input.op_code_extension)
+
+    use_sib: bool
+
+    switch mod_rm.mode {
+    case .Memory:
+      mod_rm.reg_or_mem = base
+    case .Register:
+      assert(input.rm.displacement.len == 0)
+      mod_rm.reg_or_mem = base
+    case .Disp_8:
+      unimplemented("disp 8 not supported")
+    case .Disp_32:
+      assert(input.rm.displacement.len == 4)
+      use_sib = true
+      mod_rm.reg_or_mem = .RSP
+    }
+
+    sa.append(&res, u8(mod_rm))
+    if use_sib {
+      sib := SIB { scale = 0, index = .RSP, base = base }
+      sa.append(&res, u8(sib))
+    }
+    sa.append(&res, ..sa.slice(&input.rm.displacement))
+  }
+
+  sa.append(&res, ..sa.slice(&input.immediate))
+  return
 }
 
-ret :: proc() -> u8 {
-  return 0xC3
+EncodedInstruction :: sa.Small_Array(15, u8)
+
+RM_Mode :: enum u8 {
+  Memory,
+  Disp_8,
+  Disp_32,
+  Register,
 }
 
-mod_rm :: proc(prefix: RM_Prefix, reg, regm: u8) -> u8 {
-
-  //         11       000        000
-  return u8(prefix) | reg << 3 | regm
+ModRM :: bit_field u8 {
+  reg_or_mem :  RegisterCode | 3,
+  reg:          RegisterCode | 3,
+  mode:         RM_Mode | 2,
 }
 
-REX_compute :: proc(register_a: RegisterCode, register_b: RegisterCode, mode_64 := true) -> (u8, RegisterCode, RegisterCode) {
+SIB :: bit_field u8 {
+  base:   RegisterCode | 3,
+  index:  RegisterCode | 3,
+  scale:  u8 | 2,
+}
+
+REX_compute :: proc(register, index, base_or_rm: RegisterCode, mode_64 := true) -> (u8, RegisterCode, RegisterCode, RegisterCode) {
+  register :=   register
+  index :=      index
+  base_or_rm := base_or_rm
+
   REX :u8 = 0x40
-  if mode_64 do REX |= 0x08
+  if mode_64 do REX |= 0x8
 
-  register_a := register_a
-  register_b := register_b
-  if register_a >= .R8 && register_a != .NONE{
-    REX |= 0x1
-    register_a -= .R8
-  }
-  if register_b >= .R8 && register_b != .NONE {
+  if register >= .R8 && register != .NONE {
     REX |= 0x4
-    register_b -= .R8
+    register -= .R8
   }
-  return REX, register_a, register_b
+  if index >= .R8 && index != .NONE {
+    REX |= 0x2
+    register -= .R8
+  }
+  if base_or_rm >= .R8 && base_or_rm != .NONE{
+    REX |= 0x1
+    base_or_rm -= .R8
+  }
+  return REX, register, index, base_or_rm
 }
 
-jz_32 :: proc(offset: i32) -> [6]u8 {
-  output := [6]u8 { 0x0F, 0x84, 0, 0, 0, 0 }
-  imm := transmute(^i32)&output[2]
-  imm^ = offset
-  return output
+make_op :: proc(values: ..u8) -> (code: OP_Code) {
+  sa.append(&code, ..values)
+  return
 }
 
-jnz_32 :: proc(offset: i32) -> [6]u8 {
-  output := [6]u8 { 0x0F, 0x85, 0, 0, 0, 0 }
-  imm := transmute(^i32)&output[2]
-  imm^ = offset
-  return output
+rm_reg :: proc(reg: RegisterCode) -> RM {
+  return RM { mode = .Register, base = reg }
 }
 
-jump_relative_32 :: proc(offset: i32) -> [5]u8 {
-  output := [5]u8 { 0xE9, 0, 0, 0, 0 }
-  imm := transmute(^i32)&output[1]
-  imm^ = offset
-  return output
+rm_RIP :: proc(RIP: i32) -> RM {
+  return RM { mode = .Memory, base = .RBP, displacement = make_immediate(RIP) }
 }
 
-call_relative_32 :: proc(relative_offset: u32) -> [6]u8 {
-  OP_CODE: u8 = 0xFF
-  output: [6]u8 = {OP_CODE, 0x15, 0, 0, 0, 0}
-  imm := transmute(^u32)&output[2]
-  imm^ = relative_offset
-  return output
+rm_disp32 :: proc(reg: RegisterCode, disp: i32) -> RM {
+  return RM { mode = .Disp_32, base = reg, displacement = make_immediate(disp) }
 }
 
-setnz_8 :: proc(reg: RegisterCode) -> [3]u8 {
-  return { 0x0F, 0x95, mod_rm(.Register, 0, u8(reg)) }
+make_immediate :: proc(v: $T) -> (imm: Immediate) {
+  imm.len = size_of(T)
+  assert(imm.len <= 8)
+  (transmute(^T)&imm.data[0]) ^= v
+  return
 }
 
-setz_8 :: proc(reg: RegisterCode) -> [4]u8 {
-  REX, reg, _ := REX_compute(reg, .NONE)
-  return { REX, 0x0F, 0x94, mod_rm(.Register, 0, u8(reg)) }
+// push
+
+push_r64 :: proc(reg: RegisterCode) -> EncodedInstruction {
+  return encode({flags = { .CombineReg },
+    op_code = make_op(0x50),
+    rm = { base = reg },
+  })
 }
 
-cmp_r64 :: proc(reg_a, reg_b: RegisterCode) -> [3]u8 {
-  REX, reg_a, reg_b := REX_compute(reg_a, reg_b)
-  OP_CODE :u8 : 0x3B
-  return { REX, OP_CODE, mod_rm(.Register, u8(reg_b), u8(reg_a))}
+// mov
+
+mov_rm64_r64 :: proc(rm: RM, reg: RegisterCode) -> EncodedInstruction {
+  return encode({flags = { .Mode64,  .UseReg, .UseRM },
+    op_code = make_op(0x89),
+    reg = reg,
+    rm = rm
+  })
 }
 
-movq :: proc(register_a: RegisterCode, register_b: RegisterCode) -> [3]u8 {
-  REX, register_a, register_b := REX_compute(register_a, register_b)
-  OP_CODE: u8 : 0x89
-  return {REX, OP_CODE, mod_rm(.Register, u8(register_b), u8(register_a))}
+mov_r64_rm64 :: proc(reg: RegisterCode, rm: RM) -> EncodedInstruction {
+  return encode({flags = { .Mode64,  .UseReg, .UseRM },
+    op_code = make_op(0x8B),
+    reg = reg,
+    rm = rm
+  })
 }
 
-movq_imm64 :: proc(register_a: RegisterCode, value: i64) -> [10]u8 {
-  REX, register_a, _ := REX_compute(register_a, RegisterCode.NONE)
-  OP_CODE : u8 : 0xB8
-  output := [10]u8 { REX, OP_CODE | u8(register_a), 0, 0, 0, 0, 0, 0, 0, 0 }
-  imm := transmute(^i64)&output[2]
-  imm^ = value
-  return output
+mov_rm64_imm32 :: proc(rm: RM, imm: u32) -> EncodedInstruction {
+  return encode({flags = { .Mode64,  .UseRM },
+    op_code = make_op(0xC7),
+    op_code_extension = 0x00,
+    rm = rm,
+    immediate = make_immediate(imm),
+  })
 }
 
-movq_imm32 :: proc(register_a: RegisterCode, immediate_value: i32) -> [7]u8 {
-  REX, register_a, _:= REX_compute(register_a, RegisterCode.NONE)
-  OP_CODE : u8 : 0xC7
-  output: [7]u8 = {REX, OP_CODE, mod_rm(.Register, 0, u8(register_a)), 0, 0, 0, 0}
-  imm := transmute(^i32)&output[3]
-  imm^ = immediate_value
-  return output
+mov_r64_imm64 :: proc(reg: RegisterCode, imm: u64) -> EncodedInstruction {
+  return encode({flags = {.Mode64, .CombineReg },
+    op_code = make_op(0xB8),
+    rm = RM { base = reg },
+    immediate = make_immediate(imm)
+  })
 }
 
-addq :: proc(reg_a: RegisterCode, reg_b: RegisterCode) -> [3]u8 {
-  REX, reg_a, reg_b := REX_compute(reg_a, reg_b)
-  OP_CODE : u8 : 0x01
-  return {REX, OP_CODE, mod_rm(.Register, u8(reg_b), u8(reg_a)) }
+mov :: proc {
+  mov_rm64_r64,
+  mov_r64_rm64,
+  mov_rm64_imm32,
+  mov_r64_imm64,
 }
 
-sub_imm8 :: proc(register: RegisterCode, value: u8) -> [4]u8 {
-  REX, register, _ := REX_compute(register, RegisterCode.NONE)
-  return {REX, 0x83, 0xEC, value}
+// lea
+
+lea_r64_m :: proc(reg: RegisterCode, offset: i32) -> EncodedInstruction {
+  return encode({flags = {.Mode64, .UseReg, .UseRM },
+    op_code = make_op(0x8D),
+    reg = reg,
+    rm = rm_RIP(offset)
+  })
 }
 
-imul64 :: proc(reg_a: RegisterCode, reg_b :RegisterCode) -> [4]u8 {
-  REX, reg_a, reg_b := REX_compute(reg_a, reg_b)
-  OP_CODE: u8 = 0x0F
-  return {REX, OP_CODE, 0xAF, mod_rm(.Register, u8(reg_a), u8(reg_b)) }
+// add
+
+add_rm64_imm32 :: proc(rm: RM, imm: u32) -> EncodedInstruction {
+  return encode({flags = {.Mode64, .UseRM },
+    op_code = make_op(0x81),
+    op_code_extension = 0x00,
+    rm = rm,
+    immediate = make_immediate(imm)
+  })
 }
 
-xor64 :: proc(reg_a: RegisterCode, reg_b: RegisterCode) -> [3]u8 {
-  REX, reg_a, reg_b := REX_compute(reg_a, reg_b)
-  OP_CODE: u8 = 0x31
-  return {REX, OP_CODE, mod_rm(.Register, u8(reg_a), u8(reg_b)) }
+add_r64_rm64 :: proc(reg: RegisterCode, rm: RM) -> EncodedInstruction {
+  return encode({flags = {.Mode64,  .UseReg, .UseRM },
+    op_code = make_op(0x03),
+    reg = reg,
+    rm = rm
+  })
 }
 
-idiv :: proc(register_a: RegisterCode) -> [3]u8{
-  REX, reg_a, _ := REX_compute(register_a, .NONE)
-  OP_CODE: u8 = 0xF7
-  return { REX, OP_CODE, mod_rm(.Register, 0, u8(reg_a)) }
+// sub
+
+sub_rm64_imm32 :: proc(rm: RM, imm: u32) -> EncodedInstruction {
+  return encode({flags = {.Mode64, .UseRM},
+    op_code = make_op(0x81),
+    op_code_extension = 0x05,
+    rm = rm,
+    immediate = make_immediate(imm)
+  })
 }
 
-lea :: proc(register: RegisterCode, address: u32) -> [7]u8 {
-  REX, _, register := REX_compute(RegisterCode.NONE, register)
-  result :[7]u8 = {REX, 0x8D, (0x00 | (cast(u8)register << 3)) | 0x05, 0, 0, 0, 0}
-  imm := transmute(^u32)&result[3]
-  imm^ = address
-  return result
+// mul
+
+imul_r64_rm64 :: proc(reg: RegisterCode, rm: RM) -> EncodedInstruction {
+  return encode({flags = {.Mode64, .UseReg, .UseRM},
+    op_code = make_op(0x0F, 0xAF),
+    reg = reg,
+    rm = rm,
+  })
+}
+
+// div
+
+idiv_rm64 :: proc(rm: RM) -> EncodedInstruction {
+  return encode({flags = {.Mode64, .UseRM },
+    op_code = make_op(0xF7),
+    op_code_extension = 0x07,
+    rm = rm,
+  })
+}
+
+// movsd
+
+// b can either be xmm or a m64
+movsd_load :: proc(a: RegisterCode, b: RM) -> EncodedInstruction {
+  return encode({flags = {.UseReg, .UseRM },
+    op_code = make_op(0xF2, 0x0F, 0x10),
+    reg = a,
+    rm = b
+  })
+}
+
+movsd_store :: proc(a: RM, b: RegisterCode) -> EncodedInstruction {
+  return encode({flags = {.UseReg, .UseRM},
+    op_code = make_op(0xF2, 0x0F, 0x11),
+    rm = a,
+    reg = b,
+  })
+}
+
+subsd :: proc(a: RegisterCode, b: RM) -> EncodedInstruction {
+  return encode({flags = {.UseReg, .UseRM},
+    op_code = make_op(0xF2, 0x0F, 0x5C),
+    reg = a,
+    rm = b
+  })
+}
+
+// call
+
+call_rm64 :: proc(rm: RM) -> EncodedInstruction {
+  return encode({flags = {.UseRM},
+    op_code = make_op(0xFF),
+    op_code_extension = 0x02,
+    rm = rm
+  })
+}
+
+// jump
+
+jmp_rel32 :: proc(offset: i32) -> EncodedInstruction {
+  return encode({
+    op_code = make_op(0xE9),
+    immediate = make_immediate(offset)
+  })
+}
+
+jnz_rel32 :: proc(offset: i32) -> EncodedInstruction {
+  return encode({
+    op_code = make_op(0x0F, 0x85),
+    immediate = make_immediate(offset),
+  })
+}
+
+// cmp
+
+cmp_r64_rm64 :: proc(reg: RegisterCode, rm: RM) -> EncodedInstruction {
+  return encode({flags = { .Mode64, .UseReg, .UseRM },
+    op_code = make_op(0x3B),
+    reg = reg,
+    rm = rm
+  })
 }

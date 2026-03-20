@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:sys/windows"
 import "core:mem"
+import sa "core:container/small_array"
 import os "core:os/os2"
 import "core:strings"
 import "core:io"
@@ -192,49 +193,10 @@ IMAGE_IMPORT_DESCRIPTOR :: struct {
   FirstThunk: u32
 }
 
-BUFFER_SIZE :: 100000
+BUFFER_SIZE :: 1000000
 OutputBuffer :: struct {
   buffer: [BUFFER_SIZE]u8,
   index: int
-}
-
-allocate :: proc(b: ^OutputBuffer, $T: typeid) -> ^T {
-  size := size_of(T)
-  ptr := &b.buffer[b.index]
-  b.index += size
-  return cast(^T)ptr
-}
-
-write_string :: proc(location: ^u8, s: cstring){
-  mem.copy(location, cast(^u8)s, len(s) + 1)
-}
-
-write :: proc(a: ^Assembler, arr: [$S]u8){
-  ptr := allocate(a.output_buffer, type_of(arr))
-  for i in 0..<len(arr){
-    ptr[i] = arr[i]
-  }
-}
-
-alloc_u8_array :: proc(b: ^OutputBuffer, array: [$Size]u8) -> ^[Size]u8 {
-  ptr := allocate(b, type_of(array))
-  for i in 0..<len(array) {
-    ptr[i] = array[i]
-  }
-  return ptr
-}
-
-alloc_u8 :: proc(b: ^OutputBuffer, value: u8) -> ^u8 {
-  ptr := allocate(b, u8)
-  ptr^ = value
-  return ptr
-}
-
-alloc_string :: proc(b: ^OutputBuffer, value: cstring) -> ^cstring {
-  write_string(&b.buffer[b.index], value)
-  ptr := cast(^cstring)&b.buffer[b.index]
-  b.index += len(value) + 1
-  return ptr
 }
 
 SectionFlag :: enum u32 {
@@ -254,21 +216,6 @@ SectionFlag :: enum u32 {
   MEM_EXECUTE =         29,
   MEM_READ =            30,
   MEM_WRITE =           31,
-}
-
-set_jump :: proc(a: ^Assembler, start: int){
-  end := a.output_buffer.index
-  displacement: i32 = i32(end) - i32(start)
-  ptr := transmute(^i32)&a.output_buffer.buffer[start - size_of(i32)]
-  ptr^ = displacement
-}
-
-call_string :: proc(a: ^Assembler, s: cstring){
-  append(&a.data_strings, ImportCall { s, a.output_buffer.index })
-}
-
-call_import :: proc(a: ^Assembler, s: cstring){
-  append(&a.import_calls, ImportCall { s, a.output_buffer.index })
 }
 
 ImportFunctionEntry :: struct {
@@ -304,6 +251,13 @@ Assembler :: struct {
   import_calls:     [dynamic]ImportCall,
 }
 
+align :: proc(offset: $T, alignment: T) -> T {
+  return ((offset / alignment) + 1) * alignment
+}
+
+SECTION_ALIGNMENT :: 4096
+FILE_ALIGNMENT :: 512
+
 begin :: proc(a: ^Assembler){
   a.output_buffer = new(OutputBuffer)
 
@@ -333,9 +287,6 @@ begin :: proc(a: ^Assembler){
     Characteristics = transmute(u16)characteristics,
   }
 
-  SECTION_ALIGNMENT :: 4096
-  FILE_ALIGNMENT :: 512
-
   a.nt_header.OptionalHeader = {
     Magic = 0x20B,
     AddressOfEntryPoint = SECTION_ALIGNMENT,
@@ -352,56 +303,48 @@ begin :: proc(a: ^Assembler){
     NumberOfRvaAndSizes = IMAGE_NUMBEROF_DIRECTORY_ENTRIES
   }
 
-  virtual_address: u32 =  SECTION_ALIGNMENT
-  file_address: u32 =     FILE_ALIGNMENT
-
   a.text_section = allocate(output_buffer, IMAGE_SECTION_HEADER)
-  a.text_section.VirtualAddress = SECTION_ALIGNMENT
-  a.text_section.SizeOfRawData = FILE_ALIGNMENT * 2
-  a.text_section.PointerToRawData = file_address
   a.text_section.Characteristics = transmute(u32)bit_set[SectionFlag;u32]{
     .CODE,
     .MEM_READ,
     .MEM_EXECUTE,
   }
-  write_string(&a.text_section.Name[0], ".text")
-  virtual_address += SECTION_ALIGNMENT
-  file_address += a.text_section.SizeOfRawData
+  write_cstring(&a.text_section.Name[0], ".text")
 
   a.data_section = allocate(output_buffer, IMAGE_SECTION_HEADER)
-  a.data_section.VirtualAddress = virtual_address
-  a.data_section.SizeOfRawData = FILE_ALIGNMENT * 2
-  a.data_section.PointerToRawData = file_address
   a.data_section.Characteristics = transmute(u32)bit_set[SectionFlag;u32]{
     .MEM_READ,
     .MEM_WRITE,
     .INITIALIZED_DATA
   }
-  write_string(&a.data_section.Name[0], ".data")
-  virtual_address += SECTION_ALIGNMENT
-  file_address += a.data_section.SizeOfRawData
+  write_cstring(&a.data_section.Name[0], ".data")
 
   a.import_section = allocate(output_buffer, IMAGE_SECTION_HEADER)
-  a.import_section.VirtualAddress = virtual_address
-  a.import_section.SizeOfRawData = FILE_ALIGNMENT
-  a.import_section.PointerToRawData = file_address
   a.import_section.Characteristics = transmute(u32)bit_set[SectionFlag;u32]{
     .MEM_READ,
     .MEM_WRITE,
     .INITIALIZED_DATA
   }
-  write_string(&a.import_section.Name[0], ".idata")
+  write_cstring(&a.import_section.Name[0], ".idata")
 
-  output_buffer.index = int(a.text_section.PointerToRawData)
+  buffer_resize(output_buffer, FILE_ALIGNMENT)
+  a.text_section.PointerToRawData = u32(buffer_len(output_buffer))
+  a.text_section.VirtualAddress = SECTION_ALIGNMENT
 }
 
 end :: proc(a: ^Assembler){
   output_buffer := a.output_buffer
-  a.text_section.VirtualSize = cast(u32)output_buffer.index - a.text_section.PointerToRawData
+  a.text_section.VirtualSize = u32(buffer_len(output_buffer)) - a.text_section.PointerToRawData
+  a.text_section.SizeOfRawData = align(a.text_section.VirtualSize, FILE_ALIGNMENT)
+
+
+  // data section
+  a.data_section.PointerToRawData = a.text_section.PointerToRawData + a.text_section.SizeOfRawData
+  a.data_section.VirtualAddress = a.text_section.VirtualAddress + align(a.text_section.VirtualSize, SECTION_ALIGNMENT)
 
   allocated_strings := make(map[cstring]u32, context.temp_allocator)
 
-  output_buffer.index = cast(int)a.data_section.PointerToRawData
+  buffer_resize(output_buffer, int(a.data_section.PointerToRawData))
   // data section
   for data_string in a.data_strings {
     string_offset: u32
@@ -409,7 +352,7 @@ end :: proc(a: ^Assembler){
       string_offset = offset
     }
     else {
-      string_offset = u32(output_buffer.index)
+      string_offset = u32(buffer_len(output_buffer))
       alloc_string(output_buffer, data_string.function_name)
       allocated_strings[data_string.function_name] = string_offset
     }
@@ -419,39 +362,44 @@ end :: proc(a: ^Assembler){
     ptr := transmute(^u32)&output_buffer.buffer[data_string.buffer_index - size_of(u32)]
     ptr^ = offset
   }
-  a.data_section.VirtualSize = cast(u32)output_buffer.index - a.data_section.PointerToRawData
+  a.data_section.VirtualSize = u32(buffer_len(output_buffer)) - a.data_section.PointerToRawData
+  a.data_section.SizeOfRawData = align(a.data_section.VirtualSize, FILE_ALIGNMENT)
 
-  output_buffer.index = cast(int)a.import_section.PointerToRawData
+  // import section
+  a.import_section.PointerToRawData = a.data_section.PointerToRawData + a.data_section.SizeOfRawData
+  a.import_section.VirtualAddress = a.data_section.VirtualAddress + align(a.data_section.VirtualSize, SECTION_ALIGNMENT)
 
-  IMPORT_RVA := a.import_section.VirtualAddress - cast(u32)output_buffer.index
+  buffer_resize(output_buffer, int(a.import_section.PointerToRawData))
+
+  IMPORT_RVA := a.import_section.VirtualAddress - u32(buffer_len(output_buffer))
 
   // Descriptors
   for &import_entry in a.import_entries {
-    import_entry.descriptor_RVA = cast(u32)output_buffer.index + IMPORT_RVA
+    import_entry.descriptor_RVA = u32(buffer_len(output_buffer)) + IMPORT_RVA
     import_entry.descriptor = allocate(output_buffer, IMAGE_IMPORT_DESCRIPTOR)
   }
   termination_entry := allocate(output_buffer, IMAGE_IMPORT_DESCRIPTOR)
 
   // Library name strings
   for &import_entry in a.import_entries {
-    import_entry.descriptor.Name = cast(u32)output_buffer.index + IMPORT_RVA
+    import_entry.descriptor.Name = u32(buffer_len(output_buffer)) + IMPORT_RVA
     alloc_string(output_buffer, import_entry.dll_name)
   }
 
   // function name strings / 'Hints'
   for &import_entry in a.import_entries {
     for &function_call in import_entry.functions {
-      function_call.name_RVA = u64(cast(u32)output_buffer.index + IMPORT_RVA)
-      output_buffer.index += 2 // hint
+      function_call.name_RVA = u64(u32(buffer_len(output_buffer)) + IMPORT_RVA)
+      allocate(output_buffer, [2]u8) // hint
       alloc_string(output_buffer, function_call.name)
     }
   }
 
   // import table
   for &import_entry in a.import_entries {
-    import_entry.descriptor.FirstThunk = cast(u32)output_buffer.index + IMPORT_RVA
+    import_entry.descriptor.FirstThunk = u32(buffer_len(output_buffer)) + IMPORT_RVA
     for &function_call in import_entry.functions {
-      function_call.rva = cast(u32)output_buffer.index + IMPORT_RVA
+      function_call.rva = u32(buffer_len(output_buffer)) + IMPORT_RVA
       for import_call in a.import_calls {
         if import_call.function_name != function_call.name {
           continue
@@ -459,16 +407,17 @@ end :: proc(a: ^Assembler){
 
         virtual_address := (cast(u32)import_call.buffer_index - a.text_section.PointerToRawData) + a.text_section.VirtualAddress
         offset :u32 = function_call.rva - virtual_address
-        ptr := transmute(^u32)&output_buffer.buffer[import_call.buffer_index - size_of(u32)]
+        ptr := transmute(^u32)buffer_ptr(output_buffer, import_call.buffer_index - size_of(u32))
         ptr^ = offset
       }
       rva_entry := allocate(output_buffer, u64)
       rva_entry^ = function_call.name_RVA
     }
-    output_buffer.index += size_of(u64) // termination entry
+    allocate(output_buffer, u64) // termination entry
   }
 
-  a.import_section.VirtualSize = cast(u32)output_buffer.index - a.import_section.PointerToRawData
+  a.import_section.VirtualSize = u32(buffer_len(output_buffer)) - a.import_section.PointerToRawData
+  a.import_section.SizeOfRawData = align(a.import_section.VirtualSize, FILE_ALIGNMENT)
 
   a.nt_header.OptionalHeader.DataDirectory[1] = {
     VirtualAddress = a.import_section.VirtualAddress,
@@ -476,118 +425,118 @@ end :: proc(a: ^Assembler){
   }
 
   // set the buffer to past the import section
-  output_buffer.index = int(a.import_section.PointerToRawData + a.import_section.SizeOfRawData)
+  buffer_resize(output_buffer, int(a.import_section.PointerToRawData + a.import_section.SizeOfRawData))
+  a.nt_header.OptionalHeader.SizeOfImage = align(a.import_section.VirtualAddress + a.import_section.VirtualSize, SECTION_ALIGNMENT)
 }
 
 build :: proc(a: ^Assembler, filename: string){
   file, err := os.open(filename , os.O_CREATE)
-  os.write(file, a.output_buffer.buffer[: a.output_buffer.index])
+  os.write(file, buffer_slice(a.output_buffer))
   os.close(file)
 }
 
 
-main :: proc(){
+// main :: proc(){
 
-  a: Assembler
+//   a: Assembler
 
-  a.import_entries = {
-    {
-      dll_name = "KERNEL32.DLL",
-      functions = {
-        {name = "ExitProcess"},
-      }
-    },
-    {
-      dll_name = "USER32.DLL",
-      functions = {
-        {name = "MessageBoxA"}
-      }
-    },
-    {
-      dll_name = "MSVCRT.DLL",
-      functions = {
-        {name = "printf"},
-      }
-    }
-  }
+//   a.import_entries = {
+//     {
+//       dll_name = "KERNEL32.DLL",
+//       functions = {
+//         {name = "ExitProcess"},
+//       }
+//     },
+//     {
+//       dll_name = "USER32.DLL",
+//       functions = {
+//         {name = "MessageBoxA"}
+//       }
+//     },
+//     {
+//       dll_name = "MSVCRT.DLL",
+//       functions = {
+//         {name = "printf"},
+//       }
+//     }
+//   }
 
-  begin(&a)
+//   begin(&a)
 
-    output_buffer := a.output_buffer
+//     output_buffer := a.output_buffer
+//     w(&a, push_r64(.RBP))
 
-    write(&a, sub_imm8(.RSP, 8 * 5))
+//     w(&a, mov_r64_rm64(.RBP, rm_reg(.RSP)))
 
-    write(&a, movq_imm32(.R9, 0))
-    write(&a, lea(.R8, 0))
-    call_string(&a, "whoa cool title m80")
+//     offset :i32 = 16 * 2
 
-    write(&a, lea(.RDX, 0))
-    call_string(&a, "the thing has changed or has it?")
+//     health := make_var(&offset, 8)
+//     sword :=  make_var(&offset, 8)
+//     damage := make_var(&offset, 8)
+//     w(&a, sub_rm64_imm32(rm_reg(.RSP), align(u32(offset), 16)))
 
-    write(&a, movq_imm32(.RCX, 0))
+//     set_f64(&a, sword,    1.2)
+//     set_f64(&a, damage,   3.14)
+//     set_int(&a, health,   420)
+//     print_int(&a,   health, "health")
+//     print_float(&a, damage, "damage")
+//     print_float(&a, sword,  "sword")
 
-    write(&a, call_relative_32(0))
-    call_import(&a, "MessageBoxA")
+//     w(&a, movsd_load(XMM(0), rm_disp32(.RBP, damage)))
+//     w(&a, subsd(XMM(0), rm_disp32(.RBP, sword)))
+//     w(&a, movsd_load(XMM(2), rm_reg(XMM(0))))
+//     set_f64(&a, damage, 0)
+//     set_f64(&a, sword, 0)
+//     w(&a, movsd_store(rm_disp32(.RBP, sword), XMM(2)))
+//     print_float(&a, sword, "sword after")
 
-    write(&a, movq_imm64(.R9, transmute(i64)f64(1.23)))
-    print_register(&a, "printing this %lf\n", .R9)
+//     w(&a, mov_r64_imm64(.R9, 0))
 
-    write(&a, movq(.RCX, .RAX))
+//     lea_string(&a, .R8, "whoa cool title m80")
+//     lea_string(&a, .RDX, "the thing has changed or has it?")
 
+//     w(&a, mov_r64_imm64(.RCX, 0))
 
-    write(&a, movq_imm64(.RCX, 0))
+//     call_import(&a, "MessageBoxA")
 
-    write(&a, movq_imm64(.RAX, 2))
-    write(&a, movq_imm64(.RBX, 3))
+//     w(&a, mov_r64_imm64(.R9, transmute(u64)f64(1.23)))
+//     print_register(&a, "printing this %lf\n", .R9)
 
-    write(&a, imul64(.RAX, .RBX))
+//     w(&a, mov_r64_rm64(.RCX, rm_reg(.RAX)))
+//     w(&a, mov_r64_imm64(.RCX, 0))
+//     w(&a, mov_r64_imm64(.RAX, 2))
+//     w(&a, mov_r64_imm64(.RBX, 3))
 
+//     w(&a, imul_r64_rm64(.RAX, rm_reg(.RBX)))
 
-    write(&a, movq_imm64(.RBX, 5))
+//     w(&a, mov_r64_imm64(.RBX, 6))
 
-    // if rax == rbx {
-    write(&a, cmp_r64(.RAX, .RBX))
-    write(&a, jnz_32(0))
-    else_block := a.output_buffer.index
+//     // if rax == rbx {
+//     w(&a, cmp_r64_rm64(.RAX, rm_reg(.RBX)))
+//     w(&a, jnz_rel32(0))
+//     else_block := buffer_len(a.output_buffer)
 
-    print(&a, "IF   BLOCK \n")
+//     print(&a, "IF   BLOCK \n")
 
-    write(&a, jump_relative_32(0))
-    else_block_end := a.output_buffer.index
+//     w(&a, jmp_rel32(0))
+//     else_block_end := buffer_len(a.output_buffer)
 
-    // }
-    // else {
-    set_jump(&a, else_block)
-    print(&a, "ELSE BLOCK \n")
-    // }
-    set_jump(&a, else_block_end)
+//     // }
+//     // else {
+//     set_jump(&a, else_block)
+//     print(&a, "ELSE BLOCK \n")
+//     // }
+//     set_jump(&a, else_block_end)
 
-    for i in 0..< 50 {
-      print(&a, "hello world\n")
-    }
+//     w(&a, mov_r64_imm64(.RCX, 0))
+//     call_import(&a, "ExitProcess")
 
-    write(&a, movq_imm32(.RCX, 0))
-    write(&a, call_relative_32(0))
-    call_import(&a, "ExitProcess")
+//   end(&a)
 
-  end(&a)
+//   build(&a, "test.exe")
 
-  build(&a, "test.exe")
+//   state, std_out, std_err, err := os.process_exec({command = {"test.exe"}}, context.allocator)
+//   fmt.println(string(std_out))
 
-  state, std_out, std_err, err := os.process_exec({command = {"test.exe"}}, context.allocator)
-  fmt.println(string(std_out))
-
-  os.exit(state.exit_code)
-}
-
-print_register :: proc(a: ^Assembler, format: cstring, r: RegisterCode){
-  write(a, lea(.RCX, 0))
-  call_string(a, format)
-  write(a, movq(.RDX, r))
-  write(a, call_relative_32(0))
-  call_import(a, "printf")
-}
-
-print :: proc(a: ^Assembler, format: cstring){
-  print_register(a, format, .NONE)
-}
+//   os.exit(state.exit_code)
+// }
