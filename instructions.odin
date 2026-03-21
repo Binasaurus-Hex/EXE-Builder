@@ -47,8 +47,10 @@ RM :: struct {
 }
 
 OP_Code :: sa.Small_Array(3, u8)
+LegacyPrefix :: sa.Small_Array(4, u8)
 
 EncodeInput :: struct {
+  legacy_prefix: LegacyPrefix,
   flags: bit_set[EncodeFlags],
   op_code_extension: u8,
   op_code: OP_Code,
@@ -59,6 +61,9 @@ EncodeInput :: struct {
 
 encode :: proc(input: EncodeInput) -> (res: EncodedInstruction) {
   input := input
+
+  sa.append(&res, ..sa.slice(&input.legacy_prefix))
+
   REX, reg, index, base := REX_compute(input.reg, input.rm.index, input.rm.base, .Mode64 in input.flags)
   if REX != 0x40 || .ForceREX in input.flags { // rex not required
     sa.append(&res, REX)
@@ -150,6 +155,10 @@ make_op :: proc(values: ..u8) -> (code: OP_Code) {
   sa.append(&code, ..values)
   return
 }
+make_legacy :: proc(values: ..u8) -> (prefix: LegacyPrefix) {
+  sa.append(&prefix, ..values)
+  return
+}
 
 rm_reg :: proc(reg: RegisterCode) -> RM {
   return RM { mode = .Register, base = reg }
@@ -213,6 +222,8 @@ mov_r64_imm64 :: proc(reg: RegisterCode, imm: u64) -> EncodedInstruction {
     immediate = make_immediate(imm)
   })
 }
+
+
 
 mov :: proc {
   mov_rm64_r64,
@@ -281,6 +292,17 @@ idiv_rm64 :: proc(rm: RM) -> EncodedInstruction {
   })
 }
 
+// movq
+
+movq_xmm_rm64 :: proc(reg: RegisterCode, rm: RM) -> EncodedInstruction {
+  return encode({flags = {.Mode64, .UseReg, .UseRM },
+    legacy_prefix = make_legacy(0x66),
+    op_code = make_op(0x0F, 0x6E),
+    reg = reg,
+    rm = rm
+  })
+}
+
 // movsd
 
 // b can either be xmm or a m64
@@ -341,5 +363,12 @@ cmp_r64_rm64 :: proc(reg: RegisterCode, rm: RM) -> EncodedInstruction {
     op_code = make_op(0x3B),
     reg = reg,
     rm = rm
+  })
+}
+
+cmp_rax_imm32 :: proc(imm: u32) -> EncodedInstruction {
+  return encode({flags = { .Mode64 },
+    op_code = make_op(0x3D),
+    immediate = make_immediate(imm)
   })
 }

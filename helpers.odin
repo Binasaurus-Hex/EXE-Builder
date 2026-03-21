@@ -1,6 +1,7 @@
 package main
 
 import "core:mem"
+import "core:sys/windows"
 import "core:fmt"
 
 // asm
@@ -31,6 +32,10 @@ set_f64 :: proc(a: ^Assembler, var: i32, value: f64){
   set_int(a, var, transmute(i64)value)
 }
 
+set_f32 :: proc(a: ^Assembler, var: i32, value: f32) {
+  w(a, mov_rm64_imm32(rm_disp32(.RBP, var), transmute(u32)value))
+}
+
 print_int :: proc(a: ^Assembler, var: i32, name: cstring) {
   w(a, mov_r64_imm64(.RAX, 0))
   w(a, mov_r64_rm64(.RAX, rm_disp32(.RBP, var)))
@@ -44,11 +49,22 @@ print_float :: proc(a: ^Assembler, var: i32, name: cstring) {
   print_register(a, format, .RAX)
 }
 
+make_label :: proc(a: ^Assembler) -> int {
+  return buffer_len(a.output_buffer)
+}
+
 set_jump :: proc(a: ^Assembler, start: int){
   end := buffer_len(a.output_buffer)
   displacement: i32 = i32(end) - i32(start)
   ptr := cast(^i32)buffer_ptr(a.output_buffer, start - size_of(i32))
   ptr^ = displacement
+}
+
+set_jump_back :: proc(a: ^Assembler, end: int){
+  start := buffer_len(a.output_buffer)
+  displacement :i32 = i32(end - start)
+  ptr := cast(^i32)buffer_ptr(a.output_buffer, start - size_of(i32))
+  ptr ^= displacement
 }
 
 lea_string :: proc(a: ^Assembler, reg: RegisterCode, s: cstring){
@@ -125,4 +141,10 @@ alloc_string :: proc(b: ^OutputBuffer, value: cstring) -> ^cstring {
   ptr := cast(^cstring)&b.buffer[b.index]
   b.index += len(value) + 1
   return ptr
+}
+
+// PE Setup
+
+set_subsystem :: proc(a: ^Assembler, s: SUBSYSTEM){
+  a.nt_header.OptionalHeader.Subsystem = windows.WORD(s)
 }

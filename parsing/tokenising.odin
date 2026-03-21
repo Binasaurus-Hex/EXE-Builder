@@ -1,6 +1,3 @@
-#+feature using-stmt
-#+feature dynamic-literals
-
 package parsing
 import "core:fmt"
 
@@ -20,7 +17,7 @@ TokenType :: enum {
     END_OF_FILE
 }
 
-TokenConstants := map[TokenType]string {
+TokenConstants := #partial [TokenType]string {
     .SPACE = " ", .NEWLINE = "\n", .TAB = "\t", .CARRIAGE_RETURN = "\r" ,
     .BACK_ARRROW = "<-", .FORWARD_ARROW = "->",
     .OPEN_PARENTHESIS = "(", .CLOSE_PARENTHESIS = ")",
@@ -30,7 +27,7 @@ TokenConstants := map[TokenType]string {
     .OPEN_BRACKET = "[", .CLOSE_BRACKET = "]"
 }
 
-Keywords := map[TokenType]string {
+Keywords := #partial [TokenType]string {
     .FOR = "for",
     .WHILE = "while",
     .IF = "if",
@@ -107,7 +104,7 @@ tokenize :: proc(program_text: string) -> []Token {
             identifier.type = .NUMBER
         }
         else {
-            for keyword_token, keyword_text in Keywords {
+            for keyword_text, keyword_token in Keywords {
                 if matches(program_text, end_of_last_token, keyword_text){
                     identifier.type = keyword_token
                     break
@@ -140,7 +137,7 @@ tokenize :: proc(program_text: string) -> []Token {
             continue
         }
 
-        for token_type, token_value in TokenConstants {
+        for token_value, token_type  in TokenConstants {
             if matches(program_text, i, token_value){
                 if i > end_of_last_token {
                     parse_identifier(program_text, &tokens, i, end_of_last_token)

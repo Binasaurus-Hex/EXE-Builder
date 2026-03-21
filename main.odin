@@ -295,7 +295,7 @@ begin :: proc(a: ^Assembler){
     FileAlignment = FILE_ALIGNMENT,
     MajorSubsystemVersion = 4,
     SizeOfImage = SECTION_ALIGNMENT * (SECTION_COUNT + 1),
-    SizeOfHeaders = FILE_ALIGNMENT,
+    SizeOfHeaders = 0,
     Subsystem = windows.WORD(SUBSYSTEM.CONSOLE),
     SizeOfStackReserve = 0x1000,
     SizeOfStackCommit = 0x1000,
@@ -327,7 +327,8 @@ begin :: proc(a: ^Assembler){
   }
   write_cstring(&a.import_section.Name[0], ".idata")
 
-  buffer_resize(output_buffer, FILE_ALIGNMENT)
+  buffer_resize(output_buffer, align(buffer_len(output_buffer), FILE_ALIGNMENT))
+  a.nt_header.OptionalHeader.SizeOfHeaders = windows.DWORD(buffer_len(output_buffer))
   a.text_section.PointerToRawData = u32(buffer_len(output_buffer))
   a.text_section.VirtualAddress = SECTION_ALIGNMENT
 }

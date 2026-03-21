@@ -338,5 +338,4 @@ parse :: proc(){
     parser.program_text = program_text
     parser.tokens = tokens
     syntax_tree := parse_program(&parser)
-    flattened := flatten(syntax_tree)
 }
