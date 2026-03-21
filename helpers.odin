@@ -15,10 +15,6 @@ print_register :: proc(a: ^Assembler, format: cstring, r: RegisterCode){
   call_import(a, "printf")
 }
 
-print :: proc(a: ^Assembler, format: cstring){
-  print_register(a, format, .NONE)
-}
-
 make_var :: proc(offset: ^i32, size: i32) -> i32 {
   start := offset^
   offset^ += size

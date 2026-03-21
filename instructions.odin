@@ -22,7 +22,6 @@ RegisterCode :: enum u8 {
   R13,
   R14,
   R15,
-  NONE,
 }
 
 XMM :: proc(n: int) -> RegisterCode {
@@ -41,6 +40,7 @@ EncodeFlags :: enum {
 
 RM :: struct {
   mode:         RM_Mode,
+  scale:        u8,
   index:        RegisterCode,
   base:         RegisterCode,
   displacement: Immediate
@@ -97,7 +97,7 @@ encode :: proc(input: EncodeInput) -> (res: EncodedInstruction) {
 
     sa.append(&res, u8(mod_rm))
     if use_sib {
-      sib := SIB { scale = 0, index = .RSP, base = base }
+      sib := SIB { scale = input.rm.scale, index = .RSP, base = base }
       sa.append(&res, u8(sib))
     }
     sa.append(&res, ..sa.slice(&input.rm.displacement))
@@ -128,27 +128,36 @@ SIB :: bit_field u8 {
   scale:  u8 | 2,
 }
 
+REX :: bit_field u8 {
+  b: bool       | 1,
+  x: bool       | 1,
+  r: bool       | 1,
+  mode_64: bool | 1,
+  prefix: u8    | 4, // fixed at 0x4
+}
+
 REX_compute :: proc(register, index, base_or_rm: RegisterCode, mode_64 := true) -> (u8, RegisterCode, RegisterCode, RegisterCode) {
   register :=   register
   index :=      index
   base_or_rm := base_or_rm
 
-  REX :u8 = 0x40
-  if mode_64 do REX |= 0x8
+  rex: REX
+  rex.prefix = 0x4
+  rex.mode_64 = mode_64
 
-  if register >= .R8 && register != .NONE {
-    REX |= 0x4
+  if register >= .R8 {
+    rex.r = true
     register -= .R8
   }
-  if index >= .R8 && index != .NONE {
-    REX |= 0x2
+  if index >= .R8 {
+    rex.x = true
     register -= .R8
   }
-  if base_or_rm >= .R8 && base_or_rm != .NONE{
-    REX |= 0x1
+  if base_or_rm >= .R8 {
+    rex.b = true
     base_or_rm -= .R8
   }
-  return REX, register, index, base_or_rm
+  return u8(rex), register, index, base_or_rm
 }
 
 make_op :: proc(values: ..u8) -> (code: OP_Code) {
