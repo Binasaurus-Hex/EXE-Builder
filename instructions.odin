@@ -141,9 +141,10 @@ REX_compute :: proc(register, index, base_or_rm: RegisterCode, mode_64 := true) 
   index :=      index
   base_or_rm := base_or_rm
 
-  rex: REX
-  rex.prefix = 0x4
-  rex.mode_64 = mode_64
+  rex := REX {
+    prefix = 0x4,
+    mode_64 = mode_64
+  }
 
   if register >= .R8 {
     rex.r = true
